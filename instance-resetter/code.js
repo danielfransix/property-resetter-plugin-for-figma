@@ -1,26 +1,35 @@
-figma.showUI(__html__, { width: 420, height: 460, title: 'Instance Resetter' });
+figma.showUI(__html__, { width: 420, height: 560, title: 'Instance Property Resetter' });
 
 figma.ui.onmessage = async function(msg) {
   if (msg.type === 'run') {
     try {
       await runReset(msg.scope, msg.properties);
     } catch (err) {
-      figma.ui.postMessage({ type: 'error', message: err.message });
+      figma.ui.postMessage({
+        type: 'error',
+        message: err.message || 'An unexpected error occurred. Try a smaller selection and run again.',
+      });
     }
     return;
   }
   if (msg.type === 'open_url') {
-    figma.openExternal(msg.url);
+    var allowed = [
+      'https://x.com/danielfransix',
+      'https://danielfransix.short.gy/buy-coffee',
+    ];
+    if (allowed.indexOf(msg.url) !== -1) {
+      figma.openExternal(msg.url);
+    }
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function isMixed(value) {
   return value === figma.mixed;
 }
 
-// Session-scoped font cache — avoids redundant loadFontAsync calls within one run.
 var _fontCache = {};
-
 function clearFontCache() { _fontCache = {}; }
 
 async function ensureFont(fontName) {
@@ -38,7 +47,23 @@ async function runReset(scope, properties) {
 
   var totalReset   = 0;
   var totalSkipped = 0;
+  var totalRenamed = 0;
 
+  var hasInstanceProps = !!(
+    properties.size || properties.fills || properties.strokes ||
+    properties.cornerRadius || properties.effects || properties.opacity ||
+    properties.textStyle || properties.textFill || properties.textStroke || properties.textContent
+  );
+
+  var layerNameOpts = null;
+  if (properties.layerName) {
+    layerNameOpts = {
+      includeComponents: !!properties.layerNameIncludeComponents,
+      includeInstances:  !!properties.layerNameIncludeInstances,
+    };
+  }
+
+  // ── Selection ──────────────────────────────────────────────────────────────
   if (scope === 'selection') {
     var selection = figma.currentPage.selection;
     if (!selection || selection.length === 0) {
@@ -46,45 +71,106 @@ async function runReset(scope, properties) {
       return;
     }
 
-    var instances = collectFromSelection(selection);
-    if (instances.length === 0) {
-      figma.ui.postMessage({ type: 'error', message: 'No instances found in selection.' });
-      return;
+    var instances = [];
+    if (hasInstanceProps) {
+      instances = collectFromSelection(selection);
+      if (instances.length === 0 && !layerNameOpts) {
+        figma.ui.postMessage({ type: 'error', message: 'No instances found in selection.' });
+        return;
+      }
     }
 
-    if (properties.textStyle || properties.textContent) {
-      await preloadFonts(instances);
+    if (instances.length > 0) {
+      if (properties.textStyle || properties.textContent) {
+        await preloadFonts(instances);
+      }
+      var r = await processInstances(instances, 'Selection', properties);
+      totalReset   += r.reset;
+      totalSkipped += r.skipped;
     }
 
-    var result = await processInstances(instances, 'Selection', properties);
-    totalReset   += result.reset;
-    totalSkipped += result.skipped;
+    if (layerNameOpts) {
+      for (var si = 0; si < selection.length; si++) {
+        totalRenamed += resetNamesInSubtree(selection[si], layerNameOpts);
+      }
+    }
 
-    figma.ui.postMessage({ type: 'done', count: totalReset, skipped: totalSkipped, pages: 1, scope: 'selection' });
+    var notifyMsg = buildNotifyMessage(totalReset, totalRenamed);
+    if (notifyMsg) figma.notify(notifyMsg + ' in selection');
+    figma.ui.postMessage({ type: 'done', count: totalReset, renamed: totalRenamed, skipped: totalSkipped, pages: 1, scope: 'selection' });
     return;
   }
 
+  // ── This Page / All Pages ──────────────────────────────────────────────────
   var pages = scope === 'all'
     ? figma.root.children.slice()
     : [figma.currentPage];
 
-  for (var pi = 0; pi < pages.length; pi++) {
-    var page = pages[pi];
-    var instances = page.findAll(function(n) { return n.type === 'INSTANCE'; });
-
-    if (properties.textStyle || properties.textContent) {
-      await preloadFonts(instances);
-    }
-
-    var result = await processInstances(instances, page.name, properties);
-    totalReset   += result.reset;
-    totalSkipped += result.skipped;
+  if (scope === 'all' && pages.length > 1) {
+    try { await figma.loadAllPagesAsync(); } catch (e) {}
   }
 
-  figma.ui.postMessage({ type: 'done', count: totalReset, skipped: totalSkipped, pages: pages.length, scope: scope });
+  var multiPage = pages.length > 1;
+
+  for (var pi = 0; pi < pages.length; pi++) {
+    var page     = pages[pi];
+    var topLevel = page.children;
+
+    for (var ci = 0; ci < topLevel.length; ci++) {
+      var frame = topLevel[ci];
+
+      var instances = hasInstanceProps ? collectFromFrame(frame) : [];
+      if (instances.length === 0 && !layerNameOpts) continue;
+
+      var label = multiPage ? page.name + ' / ' + frame.name : frame.name;
+
+      try {
+        if (instances.length > 0) {
+          if (properties.textStyle || properties.textContent) {
+            await preloadFonts(instances);
+          }
+          var r = await processInstances(instances, label, properties);
+          totalReset   += r.reset;
+          totalSkipped += r.skipped;
+        }
+
+        if (layerNameOpts) {
+          totalRenamed += resetNamesInSubtree(frame, layerNameOpts);
+        }
+      } catch (e) {
+        if (instances.length > 0) totalSkipped += instances.length;
+      }
+    }
+  }
+
+  var notifyMsg = buildNotifyMessage(totalReset, totalRenamed);
+  if (notifyMsg) figma.notify(notifyMsg);
+  figma.ui.postMessage({ type: 'done', count: totalReset, renamed: totalRenamed, skipped: totalSkipped, pages: pages.length, scope: scope });
+}
+
+function buildNotifyMessage(reset, renamed) {
+  var parts = [];
+  if (reset   > 0) parts.push(reset   + ' instance' + (reset   !== 1 ? 's' : '') + ' reset');
+  if (renamed > 0) parts.push(renamed + ' layer'    + (renamed !== 1 ? 's' : '') + ' renamed');
+  return parts.join(' · ');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+function collectFromFrame(frame) {
+  var instances = [];
+  if (frame.removed) return instances;
+  if (frame.type === 'INSTANCE') {
+    instances.push(frame);
+  }
+  if ('findAll' in frame) {
+    var nested = frame.findAll(function(n) { return n.type === 'INSTANCE'; });
+    for (var i = 0; i < nested.length; i++) {
+      instances.push(nested[i]);
+    }
+  }
+  return instances;
+}
 
 function collectFromSelection(selection) {
   var seen = {};
@@ -109,27 +195,19 @@ function collectFromSelection(selection) {
   return instances;
 }
 
-// Pre-collect all unique fonts from instance text nodes AND their main component
-// text nodes, then load everything in parallel. Converts N sequential awaits
-// into one Promise.all — the biggest single speedup on text-heavy files.
-// Each unique main component is only scanned once regardless of how many
-// instances share it.
 async function preloadFonts(instances) {
-  var fontMap    = {};
-  var seenMains  = {};
+  var fontMap   = {};
+  var seenMains = {};
 
   for (var i = 0; i < instances.length; i++) {
     var inst = instances[i];
     if (inst.removed) continue;
 
-    // Instance text nodes — needed to write to them.
     var instTexts = inst.findAll(function(n) { return n.type === 'TEXT'; });
     for (var ti = 0; ti < instTexts.length; ti++) {
       collectFontsFromNode(instTexts[ti], fontMap);
     }
 
-    // Main component text nodes — needed when resetting style/content to main values.
-    // Deduplicated: many instances share the same main component.
     var main = inst.mainComponent;
     if (main && !seenMains[main.id]) {
       seenMains[main.id] = true;
@@ -154,8 +232,7 @@ async function preloadFonts(instances) {
   }));
 }
 
-// Uses getStyledTextSegments (O(segments)) rather than character-by-character
-// iteration (O(characters)) — significantly faster for long text nodes.
+// Uses getStyledTextSegments (O(segments)) instead of iterating per-character.
 function collectFontsFromNode(textNode, fontMap) {
   try {
     var segments = textNode.getStyledTextSegments(['fontName']);
@@ -172,9 +249,8 @@ function collectFontsFromNode(textNode, fontMap) {
   }
 }
 
-// Processes a list of instances, throttling progress messages to at most
-// one per 80ms to avoid UI message queue overhead on large batches.
-async function processInstances(instances, pageName, properties) {
+// Throttles progress messages to ≤ one per 80ms to keep the UI queue light.
+async function processInstances(instances, label, properties) {
   var reset   = 0;
   var skipped = 0;
   var total   = instances.length;
@@ -183,7 +259,7 @@ async function processInstances(instances, pageName, properties) {
   for (var i = 0; i < total; i++) {
     var now = Date.now();
     if (now - lastMsg > 80 || i === 0) {
-      figma.ui.postMessage({ type: 'progress', page: pageName, current: i + 1, total: total });
+      figma.ui.postMessage({ type: 'progress', page: label, current: i + 1, total: total });
       lastMsg = now;
     }
     try {
@@ -202,8 +278,6 @@ async function resetInstance(instance, properties) {
   var main = instance.mainComponent;
   if (!main) return false;
 
-  // Skip-if-unchanged for size — avoids triggering Figma's change tracking
-  // when the instance is already the correct size.
   if (properties.size) {
     if (instance.width !== main.width || instance.height !== main.height) {
       try { instance.resize(main.width, main.height); } catch (e) {}
@@ -214,10 +288,8 @@ async function resetInstance(instance, properties) {
   return true;
 }
 
-// Walks instance and main component trees in lockstep by child index.
-// Instances mirror component structure exactly, so index-based matching is correct.
 async function walkTree(node, mainNode, properties) {
-  if (!node || !mainNode) return;
+  if (!node || !mainNode || node.removed) return;
 
   if (node.type === 'TEXT' && mainNode.type === 'TEXT') {
     await resetTextNode(node, mainNode, properties);
@@ -236,17 +308,27 @@ async function walkTree(node, mainNode, properties) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function resetLayerNode(node, mainNode, props) {
-  // Guard figma.mixed before deepClone — JSON/structuredClone cannot handle Symbol values.
-  if (props.fills && 'fills' in node && !isMixed(mainNode.fills)) {
-    try { node.fills = deepClone(mainNode.fills); } catch (e) {}
+  if (props.fills && 'fills' in node && !isMixed(mainNode.fills) && !isMixed(node.fills)) {
+    try {
+      if (JSON.stringify(node.fills) !== JSON.stringify(mainNode.fills)) {
+        node.fills = deepClone(mainNode.fills);
+      }
+    } catch (e) {}
   }
-  if (props.strokes && 'strokes' in node && !isMixed(mainNode.strokes)) {
-    try { node.strokes = deepClone(mainNode.strokes); } catch (e) {}
+  if (props.strokes && 'strokes' in node && !isMixed(mainNode.strokes) && !isMixed(node.strokes)) {
+    try {
+      if (JSON.stringify(node.strokes) !== JSON.stringify(mainNode.strokes)) {
+        node.strokes = deepClone(mainNode.strokes);
+      }
+    } catch (e) {}
   }
-  if (props.effects && 'effects' in node && !isMixed(mainNode.effects)) {
-    try { node.effects = deepClone(mainNode.effects); } catch (e) {}
+  if (props.effects && 'effects' in node && !isMixed(mainNode.effects) && !isMixed(node.effects)) {
+    try {
+      if (JSON.stringify(node.effects) !== JSON.stringify(mainNode.effects)) {
+        node.effects = deepClone(mainNode.effects);
+      }
+    } catch (e) {}
   }
-  // Skip-if-unchanged for opacity — avoids unnecessary writes.
   if (props.opacity && 'opacity' in node && node.opacity !== mainNode.opacity) {
     try { node.opacity = mainNode.opacity; } catch (e) {}
   }
@@ -262,7 +344,6 @@ function resetCornerRadius(node, mainNode) {
       var tr = mainNode.topRightRadius    || 0;
       var bl = mainNode.bottomLeftRadius  || 0;
       var br = mainNode.bottomRightRadius || 0;
-      // Skip-if-unchanged — corner radius writes are expensive.
       if (node.topLeftRadius !== tl || node.topRightRadius !== tr ||
           node.bottomLeftRadius !== bl || node.bottomRightRadius !== br) {
         node.topLeftRadius     = tl;
@@ -284,18 +365,24 @@ async function resetTextNode(node, mainNode, props) {
   if (props.textStyle) {
     await resetTextStyle(node, mainNode);
   }
-  if (props.textFill && !isMixed(mainNode.fills)) {
-    try { node.fills = deepClone(mainNode.fills); } catch (e) {}
+  if (props.textFill && !isMixed(mainNode.fills) && !isMixed(node.fills)) {
+    try {
+      if (JSON.stringify(node.fills) !== JSON.stringify(mainNode.fills)) {
+        node.fills = deepClone(mainNode.fills);
+      }
+    } catch (e) {}
   }
-  if (props.textStroke && !isMixed(mainNode.strokes)) {
-    try { node.strokes = deepClone(mainNode.strokes); } catch (e) {}
+  if (props.textStroke && !isMixed(mainNode.strokes) && !isMixed(node.strokes)) {
+    try {
+      if (JSON.stringify(node.strokes) !== JSON.stringify(mainNode.strokes)) {
+        node.strokes = deepClone(mainNode.strokes);
+      }
+    } catch (e) {}
   }
   if (props.textContent && node.characters !== mainNode.characters) {
     try {
-      // Fonts were pre-loaded — attempt direct write first.
       node.characters = mainNode.characters;
     } catch (e) {
-      // Fallback: load this node's fonts now and retry.
       try {
         await loadAllFonts(node);
         node.characters = mainNode.characters;
@@ -306,29 +393,29 @@ async function resetTextNode(node, mainNode, props) {
 
 async function resetTextStyle(node, mainNode) {
   try {
-    // Style-ID path: fastest — no font loading required.
     var mainStyleId = mainNode.textStyleId;
     if (mainStyleId && !isMixed(mainStyleId)) {
-      node.textStyleId = mainStyleId;
+      if (node.textStyleId !== mainStyleId) node.textStyleId = mainStyleId;
       return;
     }
 
-    // Individual-properties path: font must be loaded first.
     if (!isMixed(mainNode.fontName) && mainNode.fontName) {
-      await ensureFont(mainNode.fontName); // no-op if already cached by preloadFonts
+      await ensureFont(mainNode.fontName);
     }
 
-    if (!isMixed(mainNode.fontSize))       node.fontSize       = mainNode.fontSize;
-    if (!isMixed(mainNode.fontName))       node.fontName       = mainNode.fontName;
-    if (!isMixed(mainNode.lineHeight))     node.lineHeight     = mainNode.lineHeight;
-    if (!isMixed(mainNode.letterSpacing))  node.letterSpacing  = mainNode.letterSpacing;
-    if (!isMixed(mainNode.textCase))       node.textCase       = mainNode.textCase;
-    if (!isMixed(mainNode.textDecoration)) node.textDecoration = mainNode.textDecoration;
-    if (mainNode.paragraphSpacing !== undefined) node.paragraphSpacing = mainNode.paragraphSpacing;
+    // Scalars: plain !== is sufficient.
+    if (!isMixed(mainNode.fontSize)       && node.fontSize       !== mainNode.fontSize)       node.fontSize       = mainNode.fontSize;
+    if (!isMixed(mainNode.textCase)       && node.textCase       !== mainNode.textCase)       node.textCase       = mainNode.textCase;
+    if (!isMixed(mainNode.textDecoration) && node.textDecoration !== mainNode.textDecoration) node.textDecoration = mainNode.textDecoration;
+    if (mainNode.paragraphSpacing !== undefined && node.paragraphSpacing !== mainNode.paragraphSpacing) node.paragraphSpacing = mainNode.paragraphSpacing;
+
+    // Objects: stringify comparison to avoid writing equal structs.
+    if (!isMixed(mainNode.fontName)      && JSON.stringify(node.fontName)      !== JSON.stringify(mainNode.fontName))      node.fontName      = mainNode.fontName;
+    if (!isMixed(mainNode.lineHeight)    && JSON.stringify(node.lineHeight)    !== JSON.stringify(mainNode.lineHeight))    node.lineHeight    = mainNode.lineHeight;
+    if (!isMixed(mainNode.letterSpacing) && JSON.stringify(node.letterSpacing) !== JSON.stringify(mainNode.letterSpacing)) node.letterSpacing = mainNode.letterSpacing;
   } catch (e) {}
 }
 
-// Fallback font loader used when preloadFonts missed a node (e.g. dynamic content).
 async function loadAllFonts(textNode) {
   var fontMap = {};
   collectFontsFromNode(textNode, fontMap);
@@ -338,8 +425,109 @@ async function loadAllFonts(textNode) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Layer Name Reset
 
-// Prefer structuredClone (faster, native) with JSON fallback for safety.
+var NODE_DEFAULT_NAMES = {
+  FRAME:           'Frame',
+  GROUP:           'Group',
+  SECTION:         'Section',
+  COMPONENT:       'Component',
+  COMPONENT_SET:   'Component Set',
+  INSTANCE:        'Instance',
+  TEXT:            'Text',
+  RECTANGLE:       'Rectangle',
+  ELLIPSE:         'Ellipse',
+  POLYGON:         'Polygon',
+  STAR:            'Star',
+  LINE:            'Line',
+  VECTOR:          'Vector',
+  BOOLEAN_OPERATION: null,  // resolved from node.booleanOperation
+  SLICE:           'Slice',
+  CONNECTOR:       'Connector',
+  SHAPE_WITH_TEXT: 'Shape',
+  STICKY:          'Sticky',
+  STAMP:           'Stamp',
+  WIDGET:          'Widget',
+  EMBED:           'Embed',
+  LINK_UNFURL:     'Link',
+  MEDIA:           'Media',
+  HIGHLIGHT:       'Highlight',
+  WASHI_TAPE:      'Washi Tape',
+  CODE_BLOCK:      'Code Block',
+  TABLE:           'Table',
+  TABLE_CELL:      'Cell',
+};
+
+var BOOLEAN_OP_NAMES = {
+  UNION:     'Union',
+  SUBTRACT:  'Subtract',
+  INTERSECT: 'Intersect',
+  EXCLUDE:   'Exclude',
+};
+
+function defaultNameForNode(node) {
+  if (node.type === 'BOOLEAN_OPERATION') {
+    return BOOLEAN_OP_NAMES[node.booleanOperation] || 'Boolean';
+  }
+  return NODE_DEFAULT_NAMES[node.type] || node.type;
+}
+
+function targetNameForNode(node, opts) {
+  if (node.type === 'INSTANCE') {
+    var main = node.mainComponent;
+    return (main && main.name) ? main.name : defaultNameForNode(node);
+  }
+  return defaultNameForNode(node);
+}
+
+function renameNode(node, opts) {
+  var target = targetNameForNode(node, opts);
+  if (!target || node.name === target) return 0;
+  try { node.name = target; return 1; } catch (e) { return 0; }
+}
+
+// Iterative DFS walk — avoids call-stack limits on deeply nested files.
+// Key rules:
+//   INSTANCE       → renamed if includeInstances; children never touched
+//                    (descending would create unwanted name overrides)
+//   COMPONENT /
+//   COMPONENT_SET  → skip entire subtree if !includeComponents
+//   Everything else → rename and recurse normally
+function resetNamesInSubtree(root, opts) {
+  var renamed = 0;
+  var stack = [root];
+
+  while (stack.length > 0) {
+    var node = stack.pop();
+    if (!node || node.removed) continue;
+
+    if (node.type === 'INSTANCE') {
+      if (opts.includeInstances) renamed += renameNode(node, opts);
+      continue; // never descend into instance children
+    }
+
+    if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
+      if (!opts.includeComponents) continue; // skip whole subtree
+      renamed += renameNode(node, opts);
+      // fall through to push children
+    } else {
+      renamed += renameNode(node, opts);
+      // fall through to push children
+    }
+
+    if ('children' in node) {
+      var children = node.children;
+      for (var i = 0; i < children.length; i++) {
+        stack.push(children[i]);
+      }
+    }
+  }
+
+  return renamed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function deepClone(value) {
   try {
     return structuredClone(value);
