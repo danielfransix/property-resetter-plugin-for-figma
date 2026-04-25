@@ -1,6 +1,10 @@
-figma.showUI(__html__, { width: 420, height: 560, title: 'Instance Property Resetter' });
+figma.showUI(__html__, { width: 600, height: 800, title: 'Instance Property Resetter' });
 
 figma.ui.onmessage = async function(msg) {
+  if (msg.type === 'resize') {
+    figma.ui.resize(600, msg.height);
+    return;
+  }
   if (msg.type === 'run') {
     try {
       await runReset(msg.scope, msg.properties);
@@ -30,7 +34,23 @@ function isMixed(value) {
 }
 
 var _fontCache = {};
-function clearFontCache() { _fontCache = {}; }
+var _mainComponentCache = {};
+function clearCaches() { 
+  _fontCache = {}; 
+  _mainComponentCache = {};
+}
+
+async function getMainComponentCached(instance) {
+  if (instance.mainComponentId) {
+    if (_mainComponentCache[instance.mainComponentId]) {
+      return _mainComponentCache[instance.mainComponentId];
+    }
+    var main = await instance.getMainComponentAsync();
+    _mainComponentCache[instance.mainComponentId] = main;
+    return main;
+  }
+  return await instance.getMainComponentAsync();
+}
 
 async function ensureFont(fontName) {
   var key = fontName.family + '::' + fontName.style;
@@ -43,7 +63,7 @@ async function ensureFont(fontName) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function runReset(scope, properties) {
-  clearFontCache();
+  clearCaches();
 
   var totalReset   = 0;
   var totalSkipped = 0;
@@ -91,7 +111,7 @@ async function runReset(scope, properties) {
 
     if (layerNameOpts) {
       for (var si = 0; si < selection.length; si++) {
-        totalRenamed += resetNamesInSubtree(selection[si], layerNameOpts);
+        totalRenamed += await resetNamesInSubtree(selection[si], layerNameOpts);
       }
     }
 
@@ -135,7 +155,7 @@ async function runReset(scope, properties) {
         }
 
         if (layerNameOpts) {
-          totalRenamed += resetNamesInSubtree(frame, layerNameOpts);
+          totalRenamed += await resetNamesInSubtree(frame, layerNameOpts);
         }
       } catch (e) {
         if (instances.length > 0) totalSkipped += instances.length;
@@ -208,7 +228,7 @@ async function preloadFonts(instances) {
       collectFontsFromNode(instTexts[ti], fontMap);
     }
 
-    var main = inst.mainComponent;
+    var main = await getMainComponentCached(inst);
     if (main && !seenMains[main.id]) {
       seenMains[main.id] = true;
       var mainTexts = main.findAll(function(n) { return n.type === 'TEXT'; });
@@ -249,23 +269,28 @@ function collectFontsFromNode(textNode, fontMap) {
   }
 }
 
-// Throttles progress messages to ≤ one per 80ms to keep the UI queue light.
+// Processes instances in batches concurrently to improve speed.
 async function processInstances(instances, label, properties) {
   var reset   = 0;
   var skipped = 0;
   var total   = instances.length;
-  var lastMsg = 0;
+  var batchSize = 20;
 
-  for (var i = 0; i < total; i++) {
-    var now = Date.now();
-    if (now - lastMsg > 80 || i === 0) {
-      figma.ui.postMessage({ type: 'progress', page: label, current: i + 1, total: total });
-      lastMsg = now;
-    }
-    try {
-      if (await resetInstance(instances[i], properties)) reset++;
+  for (var i = 0; i < total; i += batchSize) {
+    figma.ui.postMessage({ type: 'progress', page: label, current: Math.min(i + batchSize, total), total: total });
+    
+    var batch = instances.slice(i, i + batchSize);
+    var results = await Promise.all(batch.map(async function(inst) {
+      try {
+        if (await resetInstance(inst, properties)) return true;
+        return false;
+      } catch (e) { return false; }
+    }));
+
+    for (var j = 0; j < results.length; j++) {
+      if (results[j]) reset++;
       else skipped++;
-    } catch (e) { skipped++; }
+    }
   }
 
   return { reset: reset, skipped: skipped };
@@ -275,8 +300,20 @@ async function processInstances(instances, label, properties) {
 
 async function resetInstance(instance, properties) {
   if (instance.removed) return false;
-  var main = instance.mainComponent;
+  var main = await getMainComponentCached(instance);
   if (!main) return false;
+
+  // Fast-path: if all supported properties are selected, use native reset overrides
+  var allProps = properties.size && properties.fills && properties.strokes &&
+                 properties.cornerRadius && properties.effects && properties.opacity &&
+                 properties.textStyle && properties.textFill && properties.textStroke && properties.textContent;
+  
+  if (allProps) {
+    try {
+      instance.resetOverrides();
+      return true;
+    } catch (e) {}
+  }
 
   if (properties.size) {
     if (instance.width !== main.width || instance.height !== main.height) {
@@ -284,23 +321,36 @@ async function resetInstance(instance, properties) {
     }
   }
 
-  await walkTree(instance, main, properties);
+  var overriddenIds = null;
+  if (instance.overrides) {
+    overriddenIds = new Set();
+    for (var i = 0; i < instance.overrides.length; i++) {
+      overriddenIds.add(instance.overrides[i].id);
+    }
+    overriddenIds.add(instance.id); // ensure root is checked
+  }
+
+  await walkTree(instance, main, properties, overriddenIds);
   return true;
 }
 
-async function walkTree(node, mainNode, properties) {
+async function walkTree(node, mainNode, properties, overriddenIds) {
   if (!node || !mainNode || node.removed) return;
 
-  if (node.type === 'TEXT' && mainNode.type === 'TEXT') {
-    await resetTextNode(node, mainNode, properties);
-  } else {
-    resetLayerNode(node, mainNode, properties);
+  var isOverridden = !overriddenIds || overriddenIds.has(node.id);
+
+  if (isOverridden) {
+    if (node.type === 'TEXT' && mainNode.type === 'TEXT') {
+      await resetTextNode(node, mainNode, properties);
+    } else {
+      resetLayerNode(node, mainNode, properties);
+    }
   }
 
   if ('children' in node && 'children' in mainNode) {
     var len = Math.min(node.children.length, mainNode.children.length);
     for (var i = 0; i < len; i++) {
-      await walkTree(node.children[i], mainNode.children[i], properties);
+      await walkTree(node.children[i], mainNode.children[i], properties, overriddenIds);
     }
   }
 }
@@ -472,16 +522,16 @@ function defaultNameForNode(node) {
   return NODE_DEFAULT_NAMES[node.type] || node.type;
 }
 
-function targetNameForNode(node, opts) {
+async function targetNameForNode(node) {
   if (node.type === 'INSTANCE') {
-    var main = node.mainComponent;
+    var main = await node.getMainComponentAsync();
     return (main && main.name) ? main.name : defaultNameForNode(node);
   }
   return defaultNameForNode(node);
 }
 
-function renameNode(node, opts) {
-  var target = targetNameForNode(node, opts);
+async function renameNode(node) {
+  var target = await targetNameForNode(node);
   if (!target || node.name === target) return 0;
   try { node.name = target; return 1; } catch (e) { return 0; }
 }
@@ -493,7 +543,7 @@ function renameNode(node, opts) {
 //   COMPONENT /
 //   COMPONENT_SET  → skip entire subtree if !includeComponents
 //   Everything else → rename and recurse normally
-function resetNamesInSubtree(root, opts) {
+async function resetNamesInSubtree(root, opts) {
   var renamed = 0;
   var stack = [root];
 
@@ -502,16 +552,16 @@ function resetNamesInSubtree(root, opts) {
     if (!node || node.removed) continue;
 
     if (node.type === 'INSTANCE') {
-      if (opts.includeInstances) renamed += renameNode(node, opts);
+      if (opts.includeInstances) renamed += await renameNode(node);
       continue; // never descend into instance children
     }
 
     if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
       if (!opts.includeComponents) continue; // skip whole subtree
-      renamed += renameNode(node, opts);
+      renamed += await renameNode(node);
       // fall through to push children
     } else {
-      renamed += renameNode(node, opts);
+      renamed += await renameNode(node);
       // fall through to push children
     }
 
