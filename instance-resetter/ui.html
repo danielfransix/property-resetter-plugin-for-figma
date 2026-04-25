@@ -54,7 +54,7 @@
       border-radius: 6px;
       color: #666;
       font-family: 'Cal Sans', sans-serif;
-      font-size: 20px;
+      font-size: 17px;
       cursor: pointer;
       text-align: center;
       transition: all 0.15s;
@@ -222,18 +222,29 @@
     }
 
     .sub-name {
-      font-size: 21px;
+      font-size: 17px;
       color: #999;
       transition: color 0.15s;
       line-height: 1.3;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .sub-item.checked .sub-name { color: #e0e0e0; }
 
     .sub-desc {
-      font-size: 20px;
+      font-size: 15px;
       color: #777;
-      line-height: 1.3;
+      line-height: 1.4;
       transition: color 0.15s;
+      display: -webkit-box;
+      display: box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
+      box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .sub-item.checked .sub-desc { color: #666; }
 
@@ -439,6 +450,18 @@
           <div class="prop-content">
             <span class="prop-name">Opacity</span>
             <span class="prop-desc">Resets the opacity value on every layer inside</span>
+          </div>
+        </div>
+
+        <div class="prop-item" data-prop="clipsContent">
+          <div class="prop-check">
+            <svg class="check-svg" viewBox="0 0 8 8" fill="none">
+              <path d="M1 4l2 2 4-4" stroke="#4ade80" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="prop-content">
+            <span class="prop-name">Clip Content</span>
+            <span class="prop-desc">Resets the clip content state to match the master component</span>
           </div>
         </div>
 

@@ -34,19 +34,27 @@ function isMixed(value) {
 }
 
 var _fontCache = {};
-var _mainComponentCache = {};
+var _mainComponentCache = new Map();
 function clearCaches() { 
   _fontCache = {}; 
-  _mainComponentCache = {};
+  _mainComponentCache.clear();
 }
 
 async function getMainComponentCached(instance) {
-  if (instance.mainComponentId) {
-    if (_mainComponentCache[instance.mainComponentId]) {
-      return _mainComponentCache[instance.mainComponentId];
+  var id = instance.mainComponentId;
+  if (id) {
+    if (_mainComponentCache.has(id)) {
+      return _mainComponentCache.get(id);
     }
     var main = await instance.getMainComponentAsync();
-    _mainComponentCache[instance.mainComponentId] = main;
+    _mainComponentCache.set(id, main);
+    
+    // Figma limits plugin memory (usually ~1GB). 
+    // Cap cache at 1000 items to prevent Out of Memory crashes on massive files.
+    if (_mainComponentCache.size > 1000) {
+      var firstKey = _mainComponentCache.keys().next().value;
+      _mainComponentCache.delete(firstKey);
+    }
     return main;
   }
   return await instance.getMainComponentAsync();
@@ -72,6 +80,7 @@ async function runReset(scope, properties) {
   var hasInstanceProps = !!(
     properties.size || properties.fills || properties.strokes ||
     properties.cornerRadius || properties.effects || properties.opacity ||
+    properties.clipsContent ||
     properties.textStyle || properties.textFill || properties.textStroke || properties.textContent
   );
 
@@ -93,7 +102,7 @@ async function runReset(scope, properties) {
 
     var instances = [];
     if (hasInstanceProps) {
-      instances = collectFromSelection(selection);
+      instances = await collectFromSelection(selection);
       if (instances.length === 0 && !layerNameOpts) {
         figma.ui.postMessage({ type: 'error', message: 'No instances found in selection.' });
         return;
@@ -126,20 +135,19 @@ async function runReset(scope, properties) {
     ? figma.root.children.slice()
     : [figma.currentPage];
 
-  if (scope === 'all' && pages.length > 1) {
-    try { await figma.loadAllPagesAsync(); } catch (e) {}
-  }
-
   var multiPage = pages.length > 1;
 
   for (var pi = 0; pi < pages.length; pi++) {
     var page     = pages[pi];
+    if (multiPage) {
+      try { await page.loadAsync(); } catch (e) {}
+    }
     var topLevel = page.children;
 
     for (var ci = 0; ci < topLevel.length; ci++) {
       var frame = topLevel[ci];
 
-      var instances = hasInstanceProps ? collectFromFrame(frame) : [];
+      var instances = hasInstanceProps ? await collectFromFrame(frame) : [];
       if (instances.length === 0 && !layerNameOpts) continue;
 
       var label = multiPage ? page.name + ' / ' + frame.name : frame.name;
@@ -177,38 +185,45 @@ function buildNotifyMessage(reset, renamed) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function collectFromFrame(frame) {
+async function collectFromFrame(frame) {
   var instances = [];
-  if (frame.removed) return instances;
-  if (frame.type === 'INSTANCE') {
-    instances.push(frame);
-  }
-  if ('findAll' in frame) {
-    var nested = frame.findAll(function(n) { return n.type === 'INSTANCE'; });
-    for (var i = 0; i < nested.length; i++) {
-      instances.push(nested[i]);
+  var stack = [frame];
+  while (stack.length > 0) {
+    await yieldIfNeeded();
+    var node = stack.pop();
+    if (!node || node.removed) continue;
+    if (node.type === 'INSTANCE') {
+      instances.push(node);
+    }
+    if ('children' in node) {
+      for (var i = 0; i < node.children.length; i++) {
+        stack.push(node.children[i]);
+      }
     }
   }
   return instances;
 }
 
-function collectFromSelection(selection) {
+async function collectFromSelection(selection) {
   var seen = {};
   var instances = [];
+  var stack = [];
   for (var si = 0; si < selection.length; si++) {
-    var sel = selection[si];
-    if (sel.type === 'INSTANCE' && !seen[sel.id]) {
-      seen[sel.id] = true;
-      instances.push(sel);
+    stack.push(selection[si]);
+  }
+  
+  while (stack.length > 0) {
+    await yieldIfNeeded();
+    var node = stack.pop();
+    if (!node || node.removed) continue;
+    
+    if (node.type === 'INSTANCE' && !seen[node.id]) {
+      seen[node.id] = true;
+      instances.push(node);
     }
-    if ('findAll' in sel) {
-      var nested = sel.findAll(function(n) { return n.type === 'INSTANCE'; });
-      for (var ni = 0; ni < nested.length; ni++) {
-        var nd = nested[ni];
-        if (!seen[nd.id]) {
-          seen[nd.id] = true;
-          instances.push(nd);
-        }
+    if ('children' in node) {
+      for (var i = 0; i < node.children.length; i++) {
+        stack.push(node.children[i]);
       }
     }
   }
@@ -242,14 +257,18 @@ async function preloadFonts(instances) {
   for (var key in fontMap) { fonts.push(fontMap[key]); }
   if (fonts.length === 0) return;
 
-  await Promise.all(fonts.map(function(f) {
-    var k = f.family + '::' + f.style;
-    if (!_fontCache[k]) {
-      _fontCache[k] = true;
-      return figma.loadFontAsync(f);
-    }
-    return Promise.resolve();
-  }));
+  var batchSize = 5;
+  for (var fi = 0; fi < fonts.length; fi += batchSize) {
+    var batch = fonts.slice(fi, fi + batchSize);
+    await Promise.all(batch.map(function(f) {
+      var k = f.family + '::' + f.style;
+      if (!_fontCache[k]) {
+        _fontCache[k] = true;
+        return figma.loadFontAsync(f);
+      }
+      return Promise.resolve();
+    }));
+  }
 }
 
 // Uses getStyledTextSegments (O(segments)) instead of iterating per-character.
@@ -269,28 +288,27 @@ function collectFontsFromNode(textNode, fontMap) {
   }
 }
 
-// Processes instances in batches concurrently to improve speed.
+// Processes instances sequentially while yielding to save memory on large files
 async function processInstances(instances, label, properties) {
   var reset   = 0;
   var skipped = 0;
   var total   = instances.length;
-  var batchSize = 20;
+  var _lastProgressTime = 0;
 
-  for (var i = 0; i < total; i += batchSize) {
-    figma.ui.postMessage({ type: 'progress', page: label, current: Math.min(i + batchSize, total), total: total });
-    
-    var batch = instances.slice(i, i + batchSize);
-    var results = await Promise.all(batch.map(async function(inst) {
-      try {
-        if (await resetInstance(inst, properties)) return true;
-        return false;
-      } catch (e) { return false; }
-    }));
-
-    for (var j = 0; j < results.length; j++) {
-      if (results[j]) reset++;
-      else skipped++;
+  for (var i = 0; i < total; i++) {
+    if (Date.now() - _lastProgressTime > 100) {
+      figma.ui.postMessage({ type: 'progress', page: label, current: i, total: total });
+      _lastProgressTime = Date.now();
     }
+    
+    var inst = instances[i];
+    try {
+      if (await resetInstance(inst, properties)) reset++;
+      else skipped++;
+    } catch (e) {
+      skipped++;
+    }
+    await yieldIfNeeded();
   }
 
   return { reset: reset, skipped: skipped };
@@ -305,7 +323,7 @@ async function resetInstance(instance, properties) {
 
   // Fast-path: if all supported properties are selected, use native reset overrides
   var allProps = properties.size && properties.fills && properties.strokes &&
-                 properties.cornerRadius && properties.effects && properties.opacity &&
+                 properties.cornerRadius && properties.effects && properties.opacity && properties.clipsContent &&
                  properties.textStyle && properties.textFill && properties.textStroke && properties.textContent;
   
   if (allProps) {
@@ -335,6 +353,7 @@ async function resetInstance(instance, properties) {
 }
 
 async function walkTree(node, mainNode, properties, overriddenIds) {
+  await yieldIfNeeded();
   if (!node || !mainNode || node.removed) return;
 
   var isOverridden = !overriddenIds || overriddenIds.has(node.id);
@@ -358,29 +377,41 @@ async function walkTree(node, mainNode, properties, overriddenIds) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function resetLayerNode(node, mainNode, props) {
-  if (props.fills && 'fills' in node && !isMixed(mainNode.fills) && !isMixed(node.fills)) {
-    try {
-      if (JSON.stringify(node.fills) !== JSON.stringify(mainNode.fills)) {
-        node.fills = deepClone(mainNode.fills);
-      }
-    } catch (e) {}
+  if (props.fills && 'fills' in node) {
+    var nFills = node.fills, mFills = mainNode.fills;
+    if (!isMixed(mFills) && !isMixed(nFills)) {
+      try {
+        if (!isEqual(nFills, mFills)) node.fills = deepClone(mFills);
+      } catch (e) {}
+    }
   }
-  if (props.strokes && 'strokes' in node && !isMixed(mainNode.strokes) && !isMixed(node.strokes)) {
-    try {
-      if (JSON.stringify(node.strokes) !== JSON.stringify(mainNode.strokes)) {
-        node.strokes = deepClone(mainNode.strokes);
-      }
-    } catch (e) {}
+  if (props.strokes && 'strokes' in node) {
+    var nStrokes = node.strokes, mStrokes = mainNode.strokes;
+    if (!isMixed(mStrokes) && !isMixed(nStrokes)) {
+      try {
+        if (!isEqual(nStrokes, mStrokes)) node.strokes = deepClone(mStrokes);
+      } catch (e) {}
+    }
   }
-  if (props.effects && 'effects' in node && !isMixed(mainNode.effects) && !isMixed(node.effects)) {
-    try {
-      if (JSON.stringify(node.effects) !== JSON.stringify(mainNode.effects)) {
-        node.effects = deepClone(mainNode.effects);
-      }
-    } catch (e) {}
+  if (props.effects && 'effects' in node) {
+    var nEffects = node.effects, mEffects = mainNode.effects;
+    if (!isMixed(mEffects) && !isMixed(nEffects)) {
+      try {
+        if (!isEqual(nEffects, mEffects)) node.effects = deepClone(mEffects);
+      } catch (e) {}
+    }
   }
-  if (props.opacity && 'opacity' in node && node.opacity !== mainNode.opacity) {
-    try { node.opacity = mainNode.opacity; } catch (e) {}
+  if (props.opacity && 'opacity' in node) {
+    var mOpacity = mainNode.opacity;
+    if (node.opacity !== mOpacity) {
+      try { node.opacity = mOpacity; } catch (e) {}
+    }
+  }
+  if (props.clipsContent && 'clipsContent' in node && 'clipsContent' in mainNode) {
+    var mClipsContent = mainNode.clipsContent;
+    if (node.clipsContent !== mClipsContent) {
+      try { node.clipsContent = mClipsContent; } catch (e) {}
+    }
   }
   if (props.cornerRadius) {
     resetCornerRadius(node, mainNode);
@@ -415,28 +446,33 @@ async function resetTextNode(node, mainNode, props) {
   if (props.textStyle) {
     await resetTextStyle(node, mainNode);
   }
-  if (props.textFill && !isMixed(mainNode.fills) && !isMixed(node.fills)) {
-    try {
-      if (JSON.stringify(node.fills) !== JSON.stringify(mainNode.fills)) {
-        node.fills = deepClone(mainNode.fills);
-      }
-    } catch (e) {}
-  }
-  if (props.textStroke && !isMixed(mainNode.strokes) && !isMixed(node.strokes)) {
-    try {
-      if (JSON.stringify(node.strokes) !== JSON.stringify(mainNode.strokes)) {
-        node.strokes = deepClone(mainNode.strokes);
-      }
-    } catch (e) {}
-  }
-  if (props.textContent && node.characters !== mainNode.characters) {
-    try {
-      node.characters = mainNode.characters;
-    } catch (e) {
+  if (props.textFill) {
+    var mFills = mainNode.fills, nFills = node.fills;
+    if (!isMixed(mFills) && !isMixed(nFills)) {
       try {
-        await loadAllFonts(node);
-        node.characters = mainNode.characters;
-      } catch (e2) {}
+        if (!isEqual(nFills, mFills)) node.fills = deepClone(mFills);
+      } catch (e) {}
+    }
+  }
+  if (props.textStroke) {
+    var mStrokes = mainNode.strokes, nStrokes = node.strokes;
+    if (!isMixed(mStrokes) && !isMixed(nStrokes)) {
+      try {
+        if (!isEqual(nStrokes, mStrokes)) node.strokes = deepClone(mStrokes);
+      } catch (e) {}
+    }
+  }
+  if (props.textContent) {
+    var mChars = mainNode.characters;
+    if (node.characters !== mChars) {
+      try {
+        node.characters = mChars;
+      } catch (e) {
+        try {
+          await loadAllFonts(node);
+          node.characters = mChars;
+        } catch (e2) {}
+      }
     }
   }
 }
@@ -449,20 +485,29 @@ async function resetTextStyle(node, mainNode) {
       return;
     }
 
-    if (!isMixed(mainNode.fontName) && mainNode.fontName) {
-      await ensureFont(mainNode.fontName);
+    var mFontName = mainNode.fontName;
+    if (!isMixed(mFontName) && mFontName) {
+      await ensureFont(mFontName);
     }
 
     // Scalars: plain !== is sufficient.
-    if (!isMixed(mainNode.fontSize)       && node.fontSize       !== mainNode.fontSize)       node.fontSize       = mainNode.fontSize;
-    if (!isMixed(mainNode.textCase)       && node.textCase       !== mainNode.textCase)       node.textCase       = mainNode.textCase;
-    if (!isMixed(mainNode.textDecoration) && node.textDecoration !== mainNode.textDecoration) node.textDecoration = mainNode.textDecoration;
-    if (mainNode.paragraphSpacing !== undefined && node.paragraphSpacing !== mainNode.paragraphSpacing) node.paragraphSpacing = mainNode.paragraphSpacing;
+    var mFontSize = mainNode.fontSize, mTextCase = mainNode.textCase;
+    var mTextDecoration = mainNode.textDecoration, mParagraphSpacing = mainNode.paragraphSpacing;
+    
+    if (!isMixed(mFontSize)       && node.fontSize       !== mFontSize)       node.fontSize       = mFontSize;
+    if (!isMixed(mTextCase)       && node.textCase       !== mTextCase)       node.textCase       = mTextCase;
+    if (!isMixed(mTextDecoration) && node.textDecoration !== mTextDecoration) node.textDecoration = mTextDecoration;
+    if (mParagraphSpacing !== undefined && node.paragraphSpacing !== mParagraphSpacing) node.paragraphSpacing = mParagraphSpacing;
 
-    // Objects: stringify comparison to avoid writing equal structs.
-    if (!isMixed(mainNode.fontName)      && JSON.stringify(node.fontName)      !== JSON.stringify(mainNode.fontName))      node.fontName      = mainNode.fontName;
-    if (!isMixed(mainNode.lineHeight)    && JSON.stringify(node.lineHeight)    !== JSON.stringify(mainNode.lineHeight))    node.lineHeight    = mainNode.lineHeight;
-    if (!isMixed(mainNode.letterSpacing) && JSON.stringify(node.letterSpacing) !== JSON.stringify(mainNode.letterSpacing)) node.letterSpacing = mainNode.letterSpacing;
+    // Objects: isEqual comparison to avoid writing equal structs.
+    var nFontName = node.fontName;
+    if (!isMixed(mFontName) && !isEqual(nFontName, mFontName)) node.fontName = mFontName;
+
+    var mLineHeight = mainNode.lineHeight, nLineHeight = node.lineHeight;
+    if (!isMixed(mLineHeight) && !isEqual(nLineHeight, mLineHeight)) node.lineHeight = mLineHeight;
+
+    var mLetterSpacing = mainNode.letterSpacing, nLetterSpacing = node.letterSpacing;
+    if (!isMixed(mLetterSpacing) && !isEqual(nLetterSpacing, mLetterSpacing)) node.letterSpacing = mLetterSpacing;
   } catch (e) {}
 }
 
@@ -471,7 +516,12 @@ async function loadAllFonts(textNode) {
   collectFontsFromNode(textNode, fontMap);
   var fonts = [];
   for (var key in fontMap) { fonts.push(fontMap[key]); }
-  await Promise.all(fonts.map(function(f) { return ensureFont(f); }));
+  
+  var batchSize = 5;
+  for (var i = 0; i < fonts.length; i += batchSize) {
+    var batch = fonts.slice(i, i + batchSize);
+    await Promise.all(batch.map(function(f) { return ensureFont(f); }));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -548,6 +598,7 @@ async function resetNamesInSubtree(root, opts) {
   var stack = [root];
 
   while (stack.length > 0) {
+    await yieldIfNeeded();
     var node = stack.pop();
     if (!node || node.removed) continue;
 
@@ -585,3 +636,32 @@ function deepClone(value) {
     return JSON.parse(JSON.stringify(value));
   }
 }
+
+function isEqual(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null || typeof a !== 'object' || typeof b !== 'object') return false;
+  
+  // Fast path for Figma properties which are typically serializable
+  try {
+    if (JSON.stringify(a) === JSON.stringify(b)) return true;
+  } catch (e) {}
+
+  var keysA = Object.keys(a), keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (var i = 0; i < keysA.length; i++) {
+    if (!keysB.includes(keysA[i])) return false;
+    if (!isEqual(a[keysA[i]], b[keysA[i]])) return false;
+  }
+  return true;
+}
+
+var _lastYieldTime = Date.now();
+var _yieldCounter = 0;
+async function yieldIfNeeded() {
+  if (++_yieldCounter % 50 !== 0) return; // Only check time every 50 calls to save Date.now() overhead
+  if (Date.now() - _lastYieldTime > 30) {
+    await new Promise(function(resolve) { setTimeout(resolve, 0); });
+    _lastYieldTime = Date.now();
+  }
+}
+
