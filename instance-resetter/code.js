@@ -80,7 +80,7 @@ async function runReset(scope, properties) {
   var hasInstanceProps = !!(
     properties.size || properties.fills || properties.strokes ||
     properties.cornerRadius || properties.effects || properties.opacity ||
-    properties.clipsContent ||
+    properties.clipsContent || properties.autoLayout || properties.padding || properties.spacing ||
     properties.textStyle || properties.textFill || properties.textStroke || properties.textContent
   );
 
@@ -324,6 +324,7 @@ async function resetInstance(instance, properties) {
   // Fast-path: if all supported properties are selected, use native reset overrides
   var allProps = properties.size && properties.fills && properties.strokes &&
                  properties.cornerRadius && properties.effects && properties.opacity && properties.clipsContent &&
+                 properties.autoLayout && properties.padding && properties.spacing &&
                  properties.textStyle && properties.textFill && properties.textStroke && properties.textContent;
   
   if (allProps) {
@@ -416,6 +417,15 @@ function resetLayerNode(node, mainNode, props) {
   if (props.cornerRadius) {
     resetCornerRadius(node, mainNode);
   }
+  if (props.autoLayout) {
+    resetAutoLayout(node, mainNode);
+  }
+  if (props.padding) {
+    resetPadding(node, mainNode);
+  }
+  if (props.spacing) {
+    resetSpacing(node, mainNode);
+  }
 }
 
 function resetCornerRadius(node, mainNode) {
@@ -438,6 +448,82 @@ function resetCornerRadius(node, mainNode) {
       }
     }
   } catch (e) {}
+}
+
+function resetAutoLayout(node, mainNode) {
+  if (!('layoutMode' in node) || !('layoutMode' in mainNode)) return;
+  try {
+    var mLayoutMode = mainNode.layoutMode;
+    if (node.layoutMode !== mLayoutMode) node.layoutMode = mLayoutMode;
+    
+    var mPrimarySizing = mainNode.primaryAxisSizingMode;
+    if (node.primaryAxisSizingMode !== mPrimarySizing) node.primaryAxisSizingMode = mPrimarySizing;
+
+    var mCounterSizing = mainNode.counterAxisSizingMode;
+    if (node.counterAxisSizingMode !== mCounterSizing) node.counterAxisSizingMode = mCounterSizing;
+
+    if ('layoutSizingVertical' in node && 'layoutSizingVertical' in mainNode) {
+      var mSizingV = mainNode.layoutSizingVertical;
+      if (node.layoutSizingVertical !== mSizingV) node.layoutSizingVertical = mSizingV;
+    }
+    if ('layoutSizingHorizontal' in node && 'layoutSizingHorizontal' in mainNode) {
+      var mSizingH = mainNode.layoutSizingHorizontal;
+      if (node.layoutSizingHorizontal !== mSizingH) node.layoutSizingHorizontal = mSizingH;
+    }
+
+    var mPrimaryAlign = mainNode.primaryAxisAlignItems;
+    if (node.primaryAxisAlignItems !== mPrimaryAlign) node.primaryAxisAlignItems = mPrimaryAlign;
+
+    var mCounterAlign = mainNode.counterAxisAlignItems;
+    if (node.counterAxisAlignItems !== mCounterAlign) node.counterAxisAlignItems = mCounterAlign;
+
+    var mWrap = mainNode.layoutWrap;
+    if (node.layoutWrap !== mWrap) node.layoutWrap = mWrap;
+  } catch(e) {}
+  
+  try {
+    if ('layoutPositioning' in node) {
+      var mPos = mainNode.layoutPositioning;
+      if (node.layoutPositioning !== mPos) node.layoutPositioning = mPos;
+    }
+    if ('layoutAlign' in node) {
+      var mAlign = mainNode.layoutAlign;
+      if (node.layoutAlign !== mAlign) node.layoutAlign = mAlign;
+    }
+    if ('layoutGrow' in node) {
+      var mGrow = mainNode.layoutGrow;
+      if (node.layoutGrow !== mGrow) node.layoutGrow = mGrow;
+    }
+  } catch(e) {}
+}
+
+function resetPadding(node, mainNode) {
+  if (!('paddingLeft' in node) || !('paddingLeft' in mainNode)) return;
+  try {
+    var mLeft = mainNode.paddingLeft;
+    if (node.paddingLeft !== mLeft) node.paddingLeft = mLeft;
+    var mRight = mainNode.paddingRight;
+    if (node.paddingRight !== mRight) node.paddingRight = mRight;
+    var mTop = mainNode.paddingTop;
+    if (node.paddingTop !== mTop) node.paddingTop = mTop;
+    var mBottom = mainNode.paddingBottom;
+    if (node.paddingBottom !== mBottom) node.paddingBottom = mBottom;
+  } catch(e) {}
+}
+
+function resetSpacing(node, mainNode) {
+  try {
+    if ('itemSpacing' in node && 'itemSpacing' in mainNode) {
+      var mSpacing = mainNode.itemSpacing;
+      if (node.itemSpacing !== mSpacing) node.itemSpacing = mSpacing;
+    }
+  } catch(e) {}
+  try {
+    if ('counterAxisSpacing' in node && 'counterAxisSpacing' in mainNode) {
+      var mCounterSpacing = mainNode.counterAxisSpacing;
+      if (node.counterAxisSpacing !== mCounterSpacing) node.counterAxisSpacing = mCounterSpacing;
+    }
+  } catch(e) {}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
