@@ -137,11 +137,12 @@ async function runReset(scope, properties) {
 
   var multiPage = pages.length > 1;
 
+  if (multiPage) {
+    await figma.loadAllPagesAsync();
+  }
+
   for (var pi = 0; pi < pages.length; pi++) {
     var page     = pages[pi];
-    if (multiPage) {
-      try { await page.loadAsync(); } catch (e) {}
-    }
     var topLevel = page.children;
 
     for (var ci = 0; ci < topLevel.length; ci++) {
