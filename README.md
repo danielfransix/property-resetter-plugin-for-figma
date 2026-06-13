@@ -39,10 +39,11 @@ To run it after installing: **Figma logo → Plugins → Development → Instanc
 
 1. Open the plugin from **Figma logo → Plugins → Development → Instance Property Resetter**
 2. Choose a **scope** — where should the plugin look for instances?
-3. Tick the **properties** you want to reset
-4. Click **Run Reset**
-5. Watch the live progress indicator at the bottom of the plugin window — it shows the current frame name and how many instances have been processed
-6. When it finishes, the status bar tells you how many instances were reset and how many layers were renamed
+3. Optionally enable the **width filter** to restrict which instances are processed by width
+4. Tick the **properties** you want to reset
+5. Click **Run Reset**
+6. Watch the live progress indicator at the bottom of the plugin window — it shows the current frame name and how many instances have been processed
+7. When it finishes, the status bar tells you how many instances were reset and how many layers were renamed
 
 **Tip:** If you're working with a large file, test on a small **Selection** first. If anything looks off, a single **Ctrl+Z** (Windows) or **Cmd+Z** (Mac) undoes the entire run.
 
@@ -59,6 +60,16 @@ This determines which part of your file the plugin scans for instances.
 | **This Page** | Every instance on the current page |
 | **All Pages** | Every instance across every page in the file |
 | **Selection** | Only instances inside whatever you currently have selected (including nested ones) |
+
+---
+
+## Width Filter
+
+An optional filter that restricts which instances get processed based on their width.
+
+When enabled, two inputs appear — **Min** and **Max** (in pixels). Instances narrower than Min or wider than Max are skipped entirely. Leave either field blank to leave that end of the range open.
+
+Useful when your file mixes components of very different sizes and you only want to touch ones in a specific width bracket (for example, resetting only full-width banner instances while leaving small icon instances alone).
 
 ---
 
