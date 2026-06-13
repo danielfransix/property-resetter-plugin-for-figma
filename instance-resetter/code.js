@@ -7,7 +7,7 @@ figma.ui.onmessage = async function(msg) {
   }
   if (msg.type === 'run') {
     try {
-      await runReset(msg.scope, msg.properties);
+      await runReset(msg.scope, msg.properties, msg.widthFilter);
     } catch (err) {
       figma.ui.postMessage({
         type: 'error',
@@ -31,6 +31,15 @@ figma.ui.onmessage = async function(msg) {
 
 function isMixed(value) {
   return value === figma.mixed;
+}
+
+var _widthFilter = { enabled: false, min: 0, max: null };
+
+function passesWidthFilter(node) {
+  if (!_widthFilter.enabled) return true;
+  if (node.width < _widthFilter.min) return false;
+  if (_widthFilter.max !== null && node.width > _widthFilter.max) return false;
+  return true;
 }
 
 var _fontCache = {};
@@ -70,7 +79,8 @@ async function ensureFont(fontName) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runReset(scope, properties) {
+async function runReset(scope, properties, widthFilter) {
+  _widthFilter = widthFilter || { enabled: false, min: 0, max: null };
   clearCaches();
 
   var totalReset   = 0;
@@ -193,7 +203,7 @@ async function collectFromFrame(frame) {
     var node = stack.pop();
     if (!node || node.removed) continue;
     if (node.type === 'INSTANCE') {
-      instances.push(node);
+      if (passesWidthFilter(node)) instances.push(node);
     }
     if ('children' in node) {
       for (var i = 0; i < node.children.length; i++) {
@@ -217,7 +227,7 @@ async function collectFromSelection(selection) {
     var node = stack.pop();
     if (!node || node.removed) continue;
     
-    if (node.type === 'INSTANCE' && !seen[node.id]) {
+    if (node.type === 'INSTANCE' && !seen[node.id] && passesWidthFilter(node)) {
       seen[node.id] = true;
       instances.push(node);
     }
