@@ -6,7 +6,7 @@
   <title>Instance Property Resetter</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cal+Sans&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cal+Sans&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -17,7 +17,7 @@
     }
 
     body {
-      font-family: 'Cal Sans', sans-serif;
+      font-family: 'DM Sans', system-ui, sans-serif;
       font-size: 22px;
       background: #141414;
       color: #c8c8c8;
@@ -54,7 +54,7 @@
       border: 1px solid #2a2a2a;
       border-radius: 6px;
       color: #666;
-      font-family: 'Cal Sans', sans-serif;
+      font-family: inherit;
       font-size: 17px;
       cursor: pointer;
       text-align: center;
@@ -299,7 +299,7 @@
       color: #081408;
       border: none;
       border-radius: 6px;
-      font-family: 'Cal Sans', sans-serif;
+      font-family: inherit;
       font-size: 14px;
       cursor: pointer;
       letter-spacing: 0.02em;
@@ -363,7 +363,7 @@
       border: 1px solid #2e2e2e;
       border-radius: 5px;
       color: #c8c8c8;
-      font-family: 'Cal Sans', sans-serif;
+      font-family: inherit;
       font-size: 14px;
       text-align: center;
       -moz-appearance: textfield;
@@ -388,6 +388,7 @@
     }
 
     .footer-brand {
+      font-family: 'Cal Sans', sans-serif;
       font-size: 12px;
       color: #fff;
       letter-spacing: 0.04em;
@@ -402,9 +403,9 @@
   <div class="section">
     <div class="section-label">Scope</div>
     <div class="scope-tabs">
-      <button class="scope-tab active" id="tabPage">This Page</button>
-      <button class="scope-tab"        id="tabAll">All Pages</button>
-      <button class="scope-tab"        id="tabSelection">Selection</button>
+      <button type="button" class="scope-tab active" id="tabPage">This Page</button>
+      <button type="button" class="scope-tab"        id="tabAll">All Pages</button>
+      <button type="button" class="scope-tab"        id="tabSelection">Selection</button>
     </div>
   </div>
 
@@ -672,7 +673,7 @@
 
   <!-- Run -->
   <div class="run-wrap">
-    <button class="run-btn" id="runBtn">Run Reset</button>
+    <button type="button" class="run-btn" id="runBtn">Run Reset</button>
   </div>
 
   <!-- Author row -->
