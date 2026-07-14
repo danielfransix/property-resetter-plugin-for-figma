@@ -1,8 +1,8 @@
-figma.showUI(__html__, { width: 600, height: 800, title: 'Instance Property Resetter' });
+figma.showUI(__html__, { width: 600, height: 900, title: 'Instance Property Resetter' });
 
 figma.ui.onmessage = async function(msg) {
   if (msg.type === 'resize') {
-    figma.ui.resize(600, msg.height);
+    figma.ui.resize(480, 900);
     return;
   }
   if (msg.type === 'run') {
